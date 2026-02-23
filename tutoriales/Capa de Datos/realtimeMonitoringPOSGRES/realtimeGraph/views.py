@@ -586,6 +586,80 @@ def get_map_json(request, **kwargs):
     return JsonResponse(data_result)
 
 
+def range_stats(request):
+    """
+    GET api/v1/analytics/range-stats
+    Parámetros opcionales: from (ms), to (ms), station_id, measurement (nombre).
+    Devuelve estadísticas (min, max, avg, count) por (estación, medición) en el rango.
+    Consulta sobre Data y entidades relacionadas (Station, Measurement) - patrón estrella.
+    """
+    start, end = get_daterange(request)
+    station_id_param = request.GET.get("station_id", None)
+    measurement_name = request.GET.get("measurement", None)
+
+    qs = Data.objects.filter(time__gte=start, time__lte=end)
+    if station_id_param:
+        try:
+            qs = qs.filter(station_id=int(station_id_param))
+        except ValueError:
+            pass
+    if measurement_name:
+        qs = qs.filter(measurement__name=measurement_name)
+
+    annotated = qs.values("station", "measurement").annotate(
+        min_val=Min("value"),
+        max_val=Max("value"),
+        avg_val=Avg("value"),
+        count=Count("value"),
+    ).order_by("station", "measurement")
+
+    station_ids = {r["station"] for r in annotated}
+    measurement_ids = {r["measurement"] for r in annotated}
+    stations = {
+        s.id: s
+        for s in Station.objects.filter(id__in=station_ids).select_related(
+            "location", "user"
+        )
+    }
+    measurements = {
+        m.id: m for m in Measurement.objects.filter(id__in=measurement_ids)
+    }
+
+    results = []
+    for r in annotated:
+        st = stations.get(r["station"])
+        me = measurements.get(r["measurement"])
+        if st is None or me is None:
+            continue
+        station_display = f"{st.user.login} @ {st.location.str()}"
+        results.append(
+            {
+                "station_id": r["station"],
+                "station_display": station_display,
+                "measurement_id": r["measurement"],
+                "measurement_name": me.name,
+                "unit": me.unit,
+                "min": round(r["min_val"], 2) if r["min_val"] is not None else 0,
+                "max": round(r["max_val"], 2) if r["max_val"] is not None else 0,
+                "avg": round(r["avg_val"], 2) if r["avg_val"] is not None else 0,
+                "count": r["count"],
+            }
+        )
+
+    from_formatted = start.strftime("%d/%m/%Y") if start else " "
+    to_formatted = end.strftime("%d/%m/%Y") if end else " "
+    payload = {
+        "from": from_formatted,
+        "to": to_formatted,
+        "filters": {
+            "station_id": int(station_id_param) if station_id_param else None,
+            "measurement": measurement_name,
+        },
+        "results": results,
+    }
+    return JsonResponse(payload)
+
+
 def download_csv_data(request):
     print("Getting time for csv req")
     startT = time.time()
